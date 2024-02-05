@@ -19,7 +19,6 @@ add_definitions(-DDREAMLAND_VERSION_CODE=${DREAMLAND_VERSION_CODE})
 
 add_library(riru_dreamland
         SHARED
-
         utils/well_known_classes.cpp
         dreamland/flavor.cpp
         dreamland/riru_flavor.cpp
@@ -27,9 +26,9 @@ add_library(riru_dreamland
         dreamland/dreamland.cpp
         dreamland/android.cpp
         dreamland/resources_hook.cpp
+        dreamland/native_hook.cpp
         dreamland/binder.cpp
-        dreamland/dex_loader.cpp
-        )
+        dreamland/dex_loader.cpp)
 
 find_library(log-lib log)
 find_package(cxx REQUIRED CONFIG)

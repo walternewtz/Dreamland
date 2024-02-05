@@ -19,9 +19,12 @@ import top.canyie.dreamland.utils.DLog;
 
 import java.io.File;
 import java.io.IOException;
-import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
+
+import static android.os.Process.ROOT_UID;
+import static android.os.Process.SHELL_UID;
+import static android.os.Process.SYSTEM_UID;
 
 /**
  * @author canyie
@@ -34,9 +37,6 @@ public final class DreamlandManagerService extends IDreamlandManager.Stub {
 
     /** Skip other packages in system server */
     private static final String SKIP_SYSTEM_SERVER = "skip_system_server";
-    private static final int ROOT_UID = 0;
-    private static final int SYSTEM_UID = Process.SYSTEM_UID;
-    private static final int SHELL_UID = 2000;
 
     private static DreamlandManagerService instance;
 
@@ -50,16 +50,16 @@ public final class DreamlandManagerService extends IDreamlandManager.Stub {
     private final ModuleManager mModuleManager;
 
     private volatile String[] mEnabledAppCache;
-    private final LruCache<String, String[]> mEnabledModuleCache = new LruCache<String, String[]>(128) {
-        @Override protected String[] create(String key) {
-            HashSet<String> set = new HashSet<>();
+    private final LruCache<String, ModuleInfo[]> mEnabledModuleCache = new LruCache<>(128) {
+        @Override protected ModuleInfo[] create(String key) {
+            HashSet<ModuleInfo> set = new HashSet<>();
             mModuleManager.getScopeFor(key, set);
-            return set.toArray(new String[set.size()]);
+            return set.toArray(new ModuleInfo[set.size()]);
         }
     };
     private volatile String[] mAllEnabledModuleCache;
 
-    private final LruCache<Integer, String[]> mAppUidMap = new LruCache<Integer, String[]>(128) {
+    private final LruCache<Integer, String[]> mAppUidMap = new LruCache<>(128) {
         @Override protected String[] create(Integer key) {
             try {
                 return pm.getPackagesForUid(key);
@@ -101,17 +101,14 @@ public final class DreamlandManagerService extends IDreamlandManager.Stub {
         pm = IPackageManager.Stub.asInterface(service);
     }
 
-    public String getModulePath(String packageName) throws RemoteException {
-        ApplicationInfo appInfo = BuildUtils.isAtLeastT()
-                ? pm.getApplicationInfo(packageName, 0L, UserHandleHidden.getCallingUserId())
-                : pm.getApplicationInfo(packageName, (int) 0, UserHandleHidden.getCallingUserId());
+    public String getModulePath(ApplicationInfo appInfo) throws RemoteException {
         if (appInfo == null) return null;
         String[] splitSourceDirs = appInfo.splitSourceDirs;
-        if (splitSourceDirs == null) return appInfo.sourceDir;
-
-        String[] apks = Arrays.copyOf(splitSourceDirs, splitSourceDirs.length + 1);
-        apks[splitSourceDirs.length] = appInfo.sourceDir;
-        return Arrays.stream(apks).filter(ModuleManager::isModuleValid).findFirst().orElse(null);
+        if (splitSourceDirs != null)
+            for (String apk : splitSourceDirs)
+                if (ModuleManager.isModuleValid(apk))
+                    return apk;
+        return appInfo.sourceDir;
     }
 
     public void onSystemServerHookCalled() {
@@ -139,8 +136,7 @@ public final class DreamlandManagerService extends IDreamlandManager.Stub {
         if (packages != null && packages.length == 1) {
             // Dreamland manager should never use sharedUserId.
             String calling = packages[0];
-            if (Dreamland.MANAGER_PACKAGE_NAME.equals(calling)
-                    || Dreamland.OLD_MANAGER_PACKAGE_NAME.equals(calling)) {
+            if (Dreamland.MANAGER_PACKAGE_NAME.equals(calling)) {
                 return true;
             }
         }
@@ -209,11 +205,10 @@ public final class DreamlandManagerService extends IDreamlandManager.Stub {
         }
     }
 
-    @Override public String[] getEnabledModulesFor(String packageName) {
+    @Override public ModuleInfo[] getEnabledModulesFor(String packageName) {
         if (mSafeModeEnabled) return null;
 
-        if (Dreamland.MANAGER_PACKAGE_NAME.equals(packageName)
-                || Dreamland.OLD_MANAGER_PACKAGE_NAME.equals(packageName)) return null;
+        if (Dreamland.MANAGER_PACKAGE_NAME.equals(packageName)) return null;
 
         boolean enabled = mGlobalModeEnabled || mAppManager.isEnabled(packageName);
         if (!enabled) return null;
@@ -221,7 +216,7 @@ public final class DreamlandManagerService extends IDreamlandManager.Stub {
         return mEnabledModuleCache.get(packageName);
     }
 
-    public String[] getEnabledModulesForSystemServer() {
+    public ModuleInfo[] getEnabledModulesForSystemServer() {
         if (mSafeModeEnabled) return null;
         if (!(mGlobalModeEnabled || mAppManager.isEnabled(AppConstants.ANDROID))) return null;
         return mEnabledModuleCache.get(AppConstants.ANDROID);
@@ -247,12 +242,15 @@ public final class DreamlandManagerService extends IDreamlandManager.Stub {
     public void setModuleEnabled(String packageName, boolean enabled) throws RemoteException {
         enforceManager("setModuleEnabled");
         if (enabled) {
-            String apkPath = getModulePath(packageName);
+            ApplicationInfo appInfo = BuildUtils.isAtLeastT()
+                    ? pm.getApplicationInfo(packageName, 0L, UserHandleHidden.getCallingUserId())
+                    : pm.getApplicationInfo(packageName, (int) 0, UserHandleHidden.getCallingUserId());
+            String apkPath = getModulePath(appInfo);
             if (apkPath == null) {
                 DLog.e(TAG, "No valid apk found for module " + packageName);
                 return;
             }
-            mModuleManager.enable(packageName, apkPath);
+            mModuleManager.enable(packageName, apkPath, appInfo.nativeLibraryDir);
         } else {
             mModuleManager.disable(packageName);
         }

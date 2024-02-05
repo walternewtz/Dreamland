@@ -36,16 +36,23 @@ MAGISK_TMP=$(magisk --path) || MAGISK_TMP="/sbin"
 
 # "ZYGISK_ENABLED" is not an API but exported unexpectedly when installing from Magisk app
 # Magisk doesn't provide an API to detect if Zygisk is working, so the only way is...
-if [ "$ZYGISK_ENABLED" = "1" ] || [ -d "$MAGISK_TMP/.magisk/zygisk" ]; then
+
+# Detect old legacy LD_PRELOAD zygisk
+[ -d "$MAGISK_TMP/.magisk/zygisk" ] && ZYGISK_ENABLED=1
+
+# Detect new native bridge based zygisk
+mount | grep -q libzygisk.so && ZYGISK_ENABLED=1
+
+# Detect Zygisk Next
+[ -d "/data/adb/modules/zygisksu" ] && ! [ -f "/data/adb/modules/zygisksu/disable" ] && ZYGISK_ENABLED=1
+
+if [ "$ZYGISK_ENABLED" = "1" ]; then
   [ "$MAGISK_VER_CODE" -lt 24000 ] && abort "! $ERR_ZYGISK_REQUIRES_24"
   FLAVOR="zygisk"
   ui_print "- $ALERT_ZYGISK_FLAVOR"
 else
   ui_print "- $ALERT_RIRU_FLAVOR"
-  MAGISK_CURRENT_RIRU_MODULE_PATH=$MAGISK_TMP/.magisk/modules/riru-core
-  # Temporarily support for KernelSU
-  [ "$KSU" = "true" ] && MAGISK_CURRENT_RIRU_MODULE_PATH="/data/adb/ksu/modules/riru-core"
-
+  MAGISK_CURRENT_RIRU_MODULE_PATH="/data/adb/modules/riru-core"
   if [ -f $MAGISK_CURRENT_RIRU_MODULE_PATH/util_functions.sh ]; then
     # Riru V24+, api version is provided in util_functions.sh
     # I don't like this, but I can only follow this change
@@ -92,7 +99,8 @@ fi
 
 ui_print "- $ALERT_EXTRACT_MODULE_FILES"
 unzip -o "$ZIPFILE" module.prop uninstall.sh post-fs-data.sh service.sh sepolicy.rule system.prop -d "$MODPATH" >&2 || abort "! $ERR_EXTRACT_MODULE_FILES $?"
-unzip -o "$ZIPFILE" 'system/*' 'riru/*' -d "$MODPATH" >&2 || abort "! $ERR_EXTRACT_SYSTEM_FOLDER $?"
+unzip -o "$ZIPFILE" 'dreamland.jar' 'riru/*' -d "$MODPATH" >&2 || abort "! $ERR_EXTRACT_SYSTEM_FOLDER $?"
+mv -f "$MODPATH/dreamland.jar" "$DREAMLAND_PATH" || abort "! $ERR_EXTRACT_SYSTEM_FOLDER $?"
 
 if [ "$IS64BIT" = "false" ]; then
   ui_print "- $ALERT_REMOVE_LIB64"
@@ -103,6 +111,7 @@ ui_print "- $ALERT_FLAVOR_SPECIFC"
 if [ "$FLAVOR" = "riru" ]; then
   if [ "$RIRU_API" -lt 25 ]; then
     ui_print "- $ALERT_OLD_RIRU $RIRU_API"
+    mkdir "$MODPATH/system/"
     mv -f "$MODPATH/riru/lib" "$MODPATH/system/"
     [ -d "$MODPATH/riru/lib64" ] && mv -f "$MODPATH/riru/lib64" "$MODPATH/system/" 2>&1
     rm -rf "$MODPATH/riru"
@@ -110,7 +119,7 @@ if [ "$FLAVOR" = "riru" ]; then
     cp -f "$MODPATH/module.prop" "$RIRU_MODULE_PATH/module.prop"
   else
     # Riru v25+, user may upgrade from old module without uninstall
-    # Remove the Riru v22's module path to make sure riru knews we're a new module
+    # Remove the Riru v22's module path to make sure riru knows we're a new module
     RIRU_22_MODULE_PATH="$RIRU_NEW_PATH/modules/$RIRU_MODULE_ID"
     ui_print "- $ALERT_REMOVE_OLD_FOR_NEW_RIRU"
     rm -rf "$RIRU_22_MODULE_PATH"

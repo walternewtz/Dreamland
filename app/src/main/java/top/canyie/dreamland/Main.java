@@ -12,9 +12,6 @@ import android.content.res.XResources;
 import android.os.Binder;
 import android.os.Build;
 import android.os.IBinder;
-import android.os.RemoteException;
-import android.os.SystemProperties;
-import android.text.TextUtils;
 import android.util.Log;
 
 import androidx.annotation.Keep;
@@ -29,6 +26,7 @@ import top.canyie.dreamland.core.PackageMonitor;
 import top.canyie.dreamland.ipc.BinderServiceProxy;
 import top.canyie.dreamland.ipc.IDreamlandManager;
 import top.canyie.dreamland.ipc.DreamlandManagerService;
+import top.canyie.dreamland.ipc.ModuleInfo;
 import top.canyie.dreamland.utils.AppConstants;
 import top.canyie.dreamland.utils.RuntimeUtils;
 import top.canyie.dreamland.utils.reflect.Reflection;
@@ -107,6 +105,7 @@ public final class Main {
         Class<? extends Resources> resClass = res.getClass();
         Class<?> taClass = TypedArray.class;
         try {
+            @SuppressLint("DiscouragedApi")
             TypedArray ta = res.obtainTypedArray(res.getIdentifier("preloaded_drawables", "array", "android"));
             taClass = ta.getClass();
             ta.recycle();
@@ -261,12 +260,12 @@ public final class Main {
                 final var called = new boolean[] { false };
                 var hook = new MethodHook() {
                     @Override public void afterCall(Pine.CallFrame callFrame) throws Throwable {
-                        // Both systemMain() and handleSystemServerProcess() are using this callback
+                        // Both systemMain() and handleSystemServerProcess() use this callback
                         if (called[0]) return;
                         called[0] = true;
                         dms.onSystemServerHookCalled();
                         Dreamland.loadedPackages.add(AppConstants.ANDROID);
-                        String[] modules = dms.getEnabledModulesForSystemServer();
+                        ModuleInfo[] modules = dms.getEnabledModulesForSystemServer();
                         if (modules != null && modules.length != 0) {
                             ClassLoader cl = Thread.currentThread().getContextClassLoader();
                             final String packageName = AppConstants.ANDROID;
@@ -363,4 +362,6 @@ public final class Main {
 
     @SuppressWarnings("JavaJniMissingFunction")
     private static native boolean initXResourcesNative(ClassLoader classLoader);
+    @SuppressWarnings("JavaJniMissingFunction")
+    public static native void recordNativeEntrypoint(String library);
 }

@@ -1,8 +1,6 @@
 package top.canyie.dreamland.core;
 
-import android.app.Activity;
 import android.app.AndroidAppHelper;
-import android.content.Context;
 import android.content.pm.ApplicationInfo;
 import android.content.res.Resources;
 import android.content.res.ResourcesHidden;
@@ -10,12 +8,10 @@ import android.content.res.ResourcesKey;
 import android.content.res.TypedArray;
 import android.content.res.XResources;
 import android.os.Build;
-import android.os.Bundle;
 import android.os.IBinder;
 import android.os.RemoteException;
 import android.text.TextUtils;
 import android.util.Log;
-import android.widget.Toast;
 
 import de.robv.android.xposed.IXposedHookInitPackageResources;
 import de.robv.android.xposed.XC_MethodHook;
@@ -25,9 +21,13 @@ import de.robv.android.xposed.callbacks.XC_InitPackageResources;
 import de.robv.android.xposed.callbacks.XCallback;
 import dev.rikka.tools.refine.Refine;
 import top.canyie.dreamland.BuildConfig;
+import top.canyie.dreamland.Main;
 import top.canyie.dreamland.ipc.IDreamlandManager;
 
+import java.io.BufferedReader;
 import java.io.File;
+import java.io.IOException;
+import java.io.InputStreamReader;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
@@ -38,9 +38,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import top.canyie.dreamland.ipc.ModuleInfo;
 import top.canyie.dreamland.utils.reflect.Reflection;
 import top.canyie.dreamland.utils.reflect.UncheckedNoSuchMethodException;
+import top.canyie.pine.Pine;
 import top.canyie.pine.utils.Primitives;
+import top.canyie.pine.xposed.ModuleClassLoader;
 import top.canyie.pine.xposed.PineXposed;
 
 import static de.robv.android.xposed.XposedBridge.*;
@@ -54,7 +57,6 @@ public final class Dreamland {
     public static final int VERSION = BuildConfig.VERSION_CODE;
     public static final String VERSION_NAME = BuildConfig.VERSION_NAME;
     public static final String MANAGER_PACKAGE_NAME = "top.canyie.dreamland.manager";
-    public static final String OLD_MANAGER_PACKAGE_NAME = "com.canyie.dreamland.manager";
     public static final File BASE_DIR = new File("/data/misc/dreamland/");
     private static final String XRESOURCES_CONFLICTING_PACKAGE = "com.sygic.aura";
 
@@ -68,7 +70,7 @@ public final class Dreamland {
 
     public static void packageReady(IDreamlandManager manager, String packageName, String processName,
                                     ApplicationInfo appInfo, ClassLoader classLoader,
-                                    boolean isFirstApp, boolean mainZygote, String[] modules) {
+                                    boolean isFirstApp, boolean mainZygote, ModuleInfo[] modules) {
         if (MANAGER_PACKAGE_NAME.equals(packageName)) {
             Log.i(TAG, "This app is dreamland manager.");
 
@@ -88,24 +90,6 @@ public final class Dreamland {
                 Log.e(TAG, "Failed to init manager", e);
             }
             return; // Don't load xposed modules in manager process.
-        } else if (OLD_MANAGER_PACKAGE_NAME.equals(packageName)) {
-            Log.w(TAG, "Detected old dreamland manager");
-            try {
-                Class<?> mainActivityClass = classLoader.loadClass("com.canyie.dreamland.manager.ui.activities.MainActivity");
-                XposedHelpers.findAndHookMethod(Activity.class, "onCreate", Bundle.class,
-                        new XC_MethodHook() {
-                                @Override protected void afterHookedMethod(MethodHookParam param) {
-                                    if (param.thisObject.getClass() != mainActivityClass) return;
-                                    String msg = "The Dreamland manager is obsolete " +
-                                            "and not compatible with current framework version! \n" +
-                                            "Please upgrade it!";
-                                    Toast.makeText((Context) param.thisObject, msg, Toast.LENGTH_SHORT).show();
-                                }
-                            });
-            } catch (Exception e) {
-                Log.e(TAG, "Failed to hook old dreamland manager", e);
-            }
-            return;
         }
 
         if (modules == null) {
@@ -127,7 +111,7 @@ public final class Dreamland {
     }
 
     public static void prepareModulesFor(IDreamlandManager dm, String packageName, String processName,
-                                         String[] modules, boolean mainZygote) {
+                                         ModuleInfo[] modules, boolean mainZygote) {
         try {
             startResourcesHook(dm);
         } catch (Throwable e) {
@@ -139,18 +123,47 @@ public final class Dreamland {
         loadXposedModules(modules, mainZygote);
     }
 
-    public static void loadXposedModules(String[] modules, boolean mainZygote) {
+    public static void loadXposedModules(ModuleInfo[] modules, boolean mainZygote) {
+        ClassLoader initCL = Dreamland.class.getClassLoader();
         synchronized (loadedModules) {
-            for (String module : modules) {
-                if (TextUtils.isEmpty(module)) {
+            for (ModuleInfo module : modules) {
+                String apk;
+                if (module == null || TextUtils.isEmpty(apk = module.path)) {
                     Log.e(TAG, "Module list contains empty, skipping");
                     Log.e(TAG, "Module list: " + Arrays.toString(modules));
                     continue;
                 }
-                if (!loadedModules.add(module)) continue;
-                Log.i(TAG, "Loading xposed module " + module);
+                if (!loadedModules.add(apk)) continue;
+                Log.i(TAG, "Loading xposed module " + apk);
+                var librarySearchPath = new StringBuilder();
+                if (!TextUtils.isEmpty(module.nativePath))
+                    librarySearchPath.append(module.nativePath).append(File.pathSeparator);
+
+                // linker on Android 6.0+ supports loading so file from uncompressed apk
+                // If so file is uncompressed, appInfo.nativeLibraryDir will not exist
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    var abis = Pine.is64Bit() ? Build.SUPPORTED_64_BIT_ABIS : Build.SUPPORTED_32_BIT_ABIS;
+                    for (String abi : abis)
+                        librarySearchPath.append(apk).append("!/lib/").append(abi).append(File.pathSeparator);
+                }
+
+                var cl = new ModuleClassLoader(apk, librarySearchPath.toString(), initCL);
+
+                // According to document, native_init should be loaded before loading java hooks
+                var n = cl.findResource("assets/native_init");
+                if (n != null) {
+                    try (var nativeLibs = new BufferedReader(new InputStreamReader(n.openStream()))) {
+                        String line;
+                        while ((line = nativeLibs.readLine()) != null)
+                            if (!(line.isEmpty() || line.startsWith("#")))
+                                Main.recordNativeEntrypoint(line);
+                    } catch (IOException e) {
+                        Log.e(TAG, "Failed to open native_init of module" + apk, e);
+                    }
+                }
+
                 // Only main zygote (non-secondary zygote) will starts the system server
-                PineXposed.loadModule(new File(module), mainZygote);
+                PineXposed.loadOpenedModule(apk, cl, mainZygote);
             }
         }
     }
